@@ -1,0 +1,237 @@
+/*
+ * ELECTRONICA DIGITAL III 2024
+ * Laboratorio 2 "Gates of survival"
+ * @file Lab2.c
+ * @brief Código del laboratorio para el control de una puerta y monitorización de batería y temperatura mediante el uso de interrupciones y temporizadores en un microcontrolador LPC1769.
+ * @version 1.0
+ */
+
+#ifdef __USE_CMSIS
+#include "LPC17xx.h"
+#include "LPC17xx_GPIO.h"
+#include "LPC17xx_PINSEL.h"
+#endif
+
+#define INPUT_A ((uint32_t)(1 << 24)) /**< Final de carrera en P0.24 (sensor de puerta cerrada) */
+#define INPUT_B ((uint32_t)(1 << 25)) /**< Comando de puerta en P0.25 (botón de apertura/cierre) */
+#define INPUT_C	((uint32_t)(1 << 26)) /**< Estado de batería en P0.26 (botón de cambio de estado de batería) */
+#define INPUT_D	((uint32_t)(1 << 23)) /**< Sensor de Temp en P0.23 (switch de temp) */
+#define INPUT  	0 /**< Configuración de entrada */
+#define OUTPUT 	1 /**< Configuración de salida */
+#define TRUE  	1 /**< Valor booleano verdadero */
+#define FALSE 	0 /**< Valor booleano falso */
+#define EDGE_RISING 0 /**< Valor booleano falso */
+
+/**
+ * @brief Configuracion de puertos GPIO como salida
+ *
+ * Configura los pines P0.0 y P0.1 como salidas para el control de LEDs
+ * que representan el motor y una alarma, respectivamente. También configura
+ * el pin P0.22 como salida para el indicador del estado de la batería.
+ */
+void configGPIO();
+
+/**
+ * @brief Configuracion de puertos GPIO para interrupcion
+ *
+ * Configura los pines P0.24, P0.25 y P0.26 como entradas para manejar las
+ * interrupciones generadas por el sensor de final de carrera, el botón de apertura/cierre
+ * de la puerta, y el botón de cambio de estado de batería.
+ */
+void configIntGPIO();
+
+/**
+ * @brief Configuracion del Timer0
+ *
+ * Configura el Timer0 para generar una interrupción al alcanzar un valor de coincidencia (Match),
+ * lo que permite controlar el tiempo para diversas tareas como la gestión de temperatura.
+ */
+void configTimer0();
+
+/* Variables auxiliares */
+uint8_t BATERY = 0xff;	/**< Estado inicial de la batería (llena: 0xff) */
+
+/**
+ * @brief Main fuction
+ *
+ * Configura los GPIO, las interrupciones y el Timer0. Luego, inicia el SysTick para gestionar el
+ * reloj del sistema. La función principal entra en un bucle infinito mientras las interrupciones
+ * manejan el funcionamiento del sistema.
+ * Y controla el estado de la puerta al inicioi para iniciar el programa con la puerta abierta.
+ * 
+ * @return Retorna 0 si la ejecución es correcta.
+ */
+int main(void) {
+	configGPIO();
+	configIntGPIO();
+	configTimer0();
+
+	SysTick_Config(SystemCoreClock/100); 	/* SystemCoreClock = 100MHz */
+
+	if(((LPC_GPIO0->FIOPIN) & (1 << 24)) != 0){			/* Si esta cerrada la puerta verificando con el sensor */
+		LPC_GPIO0->FIOSET = (1);					/* Activa el motor para abrir */
+	}
+
+	while(1){}
+
+	return 0;
+}
+
+void configGPIO(){
+
+	/*
+		LED Representacion de motor 			P0.0
+		LED Indicador de alarma 				P0.1
+	*/
+	LPC_GPIO0->FIODIR |= (3); 				/* P0.0 y P0.1 como salida */ 
+
+	/*
+		LED Indicador de estado de bateria 	P0.22
+	*/
+	LPC_PINCON->PINSEL1 &= ~(3<<12); 		/* P0.22 como GPIO (por defecto ya esta como gpio) */ 
+	LPC_GPIO0->FIODIR2 |= (1<<6); 			/* P0.22 como salida */ 
+
+	LPC_GPIO0->FIOMASK  = ~(0x20003);    	/* Se enmascaran los bits del puerto 0 que no usamos */
+
+	return;
+}
+
+void configIntGPIO(){
+
+	/*
+		LLAVE Representacion de sensor de temperatura  			P0.23
+		(1 menor temperatura -> cerrar puerta / 0 no hacer nada)
+		LLAVE Representacion de sensor de final de carrera		P0.24
+		(1 puerta cerrada / 0 puerta abierta)
+		BOTON Abrir/Cerrar la puerta 							P0.25
+		(flanco de subida cambia el estado de la puerta)
+		BOTON Cambio estado de bateria							P0.26
+		(flanco de subida cambia el estado de bateria)
+	*/
+
+	/* Configuracion de puertos y pull-down */
+	PINSEL_CFG_Type PIN_CFG;
+	PIN_CFG.Portnum = PINSEL_PORT_0;
+	PIN_CFG.Pinnum = PINSEL_PIN_23;
+	PIN_CFG.Funcnum = PINSEL_FUNC_0;
+	PIN_CFG.Pinmode = PINSEL_PINMODE_PULLDOWN;
+	PIN_CFG.OpenDrain = PINSEL_PINMODE_NORMAL;
+	PINSEL_ConfigPin(&PIN_CFG);	
+	PIN_CFG.Pinnum = PINSEL_PIN_24;
+	PINSEL_ConfigPin(&PIN_CFG);
+	PIN_CFG.Pinnum = PINSEL_PIN_25;
+	PINSEL_ConfigPin(&PIN_CFG);
+	PIN_CFG.Pinnum = PINSEL_PIN_26;
+	PINSEL_ConfigPin(&PIN_CFG);
+
+	/* Configuracion de entradas */
+	GPIO_SetDir(PINSEL_PORT_0,INPUT_A,INPUT);	
+	GPIO_SetDir(PINSEL_PORT_0,INPUT_B,INPUT);
+	GPIO_SetDir(PINSEL_PORT_0,INPUT_C,INPUT);
+	GPIO_SetDir(PINSEL_PORT_0,INPUT_D,INPUT);
+
+	/* Habilita las interrupciones */
+	GPIO_IntCmd(PINSEL_PORT_0,INPUT_A,EDGE_RISING);	
+	GPIO_IntCmd(PINSEL_PORT_0,INPUT_B,EDGE_RISING);
+	GPIO_IntCmd(PINSEL_PORT_0,INPUT_C,EDGE_RISING);
+	GPIO_IntCmd(PINSEL_PORT_0,INPUT_D,EDGE_RISING);
+
+	/* Borra el posible flag de interrupcion */
+	GPIO_ClearInt(PINSEL_PORT_0,INPUT_A);
+	GPIO_ClearInt(PINSEL_PORT_0,INPUT_B);
+	GPIO_ClearInt(PINSEL_PORT_0,INPUT_C);
+	GPIO_ClearInt(PINSEL_PORT_0,INPUT_D);
+	
+	/* Habilita interrupciones externas. */
+	NVIC_EnableIRQ(EINT3_IRQn);
+	return;
+}
+
+void configTimer0(void){
+
+    LPC_SC->PCONP |= (1 << 1);  	/* Encender el periferico: energiza el Timer0 */
+    LPC_SC->PCLKSEL0 &= ~(3 << 2);	/* PCLK = CCLK/4 = 25 MHz */
+
+    LPC_TIM0->MR0 = 25000000 - 1;  	/* Valor de match para 1 segundo (25 MHz) */
+    LPC_TIM0->MCR |= (1 << 0);     	/* Interrumpir en MR0 match */
+    LPC_TIM0->MCR |= (1 << 1);     	/* Reiniciar el timer cuando MR0 haga match */
+
+    LPC_TIM0->TCR = 1;  			/* Timer0 Enable */
+    NVIC_EnableIRQ(TIMER0_IRQn); 	/* Habilito la interrupción del Timer0 */
+    return;
+}
+
+/**
+ * @brief Servicio que maneja la interrupción EINT3.
+ * 
+ * Gestiona el sensor de final de carrera, el botón de apertura/cierre de la puerta
+ * y el botón de cambio de estado de batería. Cambia el estado de la puerta y el nivel
+ * de carga de la batería en función de las interrupciones.
+ */
+void EINT3_IRQHandler(){
+
+	if((LPC_GPIOINT->IO0IntStatR) & (1<<24)){			/* LLAVE Representacion de sensor de final de carrera de apertura */
+		LPC_GPIO0->FIOCLR = 1;							/* Detiene el motor (apaga el led) */
+		LPC_GPIOINT-> IO0IntClr |= (1<<24);
+
+	} else if((LPC_GPIOINT->IO0IntStatR) & (1<<25)){	/* BOTON Abrir/Cerrar la puerta */
+		if(((LPC_GPIO0->FIOPIN) & (1 << 24)) != 0){			/* Si esta cerrada la puerta con el sensor */
+			LPC_GPIO0->FIOSET = (1);					/* Activa el motor para abrir */
+			while(((LPC_GPIO0->FIOPIN)&(1<<24)) == 0){}	/* espero hasta que el sensor de carrera sea 0 */
+		} else if(((LPC_GPIO0->FIOPIN)&(1<<24)) == 0){ 	/* Si esta abierta la puerta */
+			LPC_GPIO0->FIOSET = (1);					/* Activa el motor para cerrar */
+		}
+		LPC_GPIOINT-> IO0IntClr |= (1<<25);
+
+	} else if((LPC_GPIOINT->IO0IntStatR) & (1<<26)){	/* BOTON Cambio estado de bateria */
+		if(BATERY == (0xaa)){						  
+			BATERY = 0xff;								/* FF (11111111) (LLENA) */
+		} else if (BATERY == (0xff)){
+			BATERY = 0x1;								/* 1 (00000001) (MEDIO) */
+		} else if(BATERY == (0x1)){
+			BATERY = 0xaa;								/* AA (10101010)(VACIA) */
+		}
+		LPC_GPIOINT-> IO0IntClr |= (1<<26);
+	}
+
+	return;
+}
+
+/**
+ * @brief Servicio que maneja la interrupción del SysTick.
+ * 
+ * Esta función es llamada cada vez que ocurre una interrupción del SysTick.
+ * Divide el reloj en ciclos de 10, y cuando se alcanza este valor,
+ * desplaza los bits de la variable BATERY para controlar el estado de
+ * un LED indicador en el puerto P0.22. El contador counter se utiliza
+ * para realizar el desplazamiento de los bits de manera cíclica.
+ */
+void SysTick_Handler(void){
+    static uint8_t clkDiv = 0;												/* Divisor del reloj para realizar operaciones cada 10 ciclos */
+    static uint8_t counter = 0;												/* Contador para desplazar los bits de BATERY */
+
+	//Si el divissor del reloj alcanza 10, realizar el desplzamiento de bits
+    if(clkDiv == 10){
+        LPC_GPIO0->FIOPIN = (((~BATERY & 0xff) << counter & 0x80) << 15);	/* Actualiza el estado del LED */
+        counter = (counter == 7) ? 0 : counter + 1;							/* Reinicia el contador al llegar a 7 */
+        clkDiv = 0;															/* Reinicia el divisor del reloj */	
+    } else {
+        clkDiv++;															/* Incrementa el divisor del reloj */
+    }
+
+    SysTick->CTRL &= SysTick->CTRL; 										/* Limpia la bandera de interrupción */ 
+}
+
+void Timer0_IRQHandler(){
+	if (LPC_TIM0->IR & (1 << 0)) {					/* Comprobar si la interrupción es de MR0 */
+		LPC_TIM0->IR |= (1 << 0);  					/* Limpiar la bandera de interrupción */
+
+		if((LPC_GPIOINT->IO0IntStatR) & (1<<23)){	/* comprobar que el sensor de temp este activado (detectado menor temp)*/
+			LPC_GPIO0->FIOSET = (1<<1);				/* Activa la alarma (LED en P0.1) */
+			if(((LPC_GPIO0->FIOPIN)&(1<<24)) == 0){	/* Si esta abierta la puerta verificando con el sensor */
+			LPC_GPIO0->FIOSET = (1);				/* Activa el motor para cerrar */
+			}
+		}
+	}
+	return;
+}
